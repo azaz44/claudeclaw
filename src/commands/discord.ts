@@ -651,7 +651,8 @@ interface DiscordStreamCallbacks {
 
 function makeDiscordStreamCallback(token: string, channelId: string, options: { verbose?: boolean } = {}): DiscordStreamCallbacks {
   const { verbose = false } = options;
-  let accumulated = "";
+  let textAcc = "";
+  const toolLines: string[] = [];
   let streamMsgId: string | null = null;
   let editTimer: ReturnType<typeof setTimeout> | null = null;
   let placeholderPosted = false;
@@ -686,14 +687,31 @@ function makeDiscordStreamCallback(token: string, channelId: string, options: { 
     }
   }
 
+  function getDisplay(): string {
+    const MAX_TOOL_LINES = 8;
+    const MAX_TEXT_LINES = 10;
+    let toolPart: string;
+    if (toolLines.length > MAX_TOOL_LINES) {
+      const shown = toolLines.slice(-MAX_TOOL_LINES);
+      toolPart = `[...${toolLines.length - MAX_TOOL_LINES} earlier tool calls]\n` + shown.join("\n");
+    } else {
+      toolPart = toolLines.join("\n");
+    }
+    let textPart = textAcc;
+    const textLines = textPart.split("\n");
+    if (textLines.length > MAX_TEXT_LINES) {
+      textPart = `[...]\n` + textLines.slice(-MAX_TEXT_LINES).join("\n");
+    }
+    return toolPart + (textPart ? (toolPart ? "\n" : "") + textPart : "");
+  }
+
   function scheduleEdit(): void {
     if (editTimer) return;
     editTimer = setTimeout(async () => {
       editTimer = null;
       if (!streamMsgId) return;
-      const snippet = accumulated.slice(-STREAM_CONTENT_MAX);
-      const escaped = escapeItalic(snippet);
-      const content = `_${escaped}_`;
+      const display = verbose ? getDisplay() : `_${escapeItalic(textAcc.slice(-STREAM_CONTENT_MAX))}_`;
+      const content = display.slice(0, DISCORD_MAX_MESSAGE_LEN);
       try {
         await discordApi(
           token,
@@ -708,7 +726,7 @@ function makeDiscordStreamCallback(token: string, channelId: string, options: { 
   }
 
   const onChunk = (text: string): void => {
-    accumulated += text;
+    textAcc += text;
     if (!placeholderPosted) {
       postPlaceholder().catch((err) =>
         console.error(`[Discord][stream] postPlaceholder error: ${err instanceof Error ? err.message : err}`),
@@ -725,7 +743,7 @@ function makeDiscordStreamCallback(token: string, channelId: string, options: { 
         console.error(`[Discord][stream] postPlaceholder error: ${err instanceof Error ? err.message : err}`),
       );
     }
-    accumulated += (accumulated ? "\n" : "") + line;
+    toolLines.push(line);
     if (streamMsgId) scheduleEdit();
   };
 
