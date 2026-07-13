@@ -139,6 +139,9 @@ let readyGuildIds: Set<string> | null = null;
 // Track known thread channel IDs and their parent channel IDs for multi-session support
 const knownThreads = new Map<string, { parentId: string; agentName?: string }>();
 
+// Channels with verbose tool display enabled
+const verboseChannels = new Set<string>();
+
 function isDiscordThreadType(type: number | undefined): boolean {
   return type === 10 || type === 11 || type === 12;
 }
@@ -340,6 +343,14 @@ async function sendMessageWithImages(
   }
 
   await uploadImageMessage(token, channelId, uploadText, imagePaths);
+}
+
+async function sendImagesSilent(
+  token: string,
+  channelId: string,
+  imagePaths: string[],
+): Promise<void> {
+  await uploadImageMessage(token, channelId, "", imagePaths);
 }
 
 async function uploadImageMessage(
@@ -587,6 +598,11 @@ async function registerSlashCommands(token: string): Promise<void> {
       description: "Show context window usage",
       type: 1,
     },
+    {
+      name: "verbose",
+      description: "Toggle tool call display in streaming responses",
+      type: 1,
+    },
   ];
 
   await discordApi(
@@ -633,7 +649,8 @@ interface DiscordStreamCallbacks {
   waitForStreamMsg: () => Promise<{ msgId: string } | null>;
 }
 
-function makeDiscordStreamCallback(token: string, channelId: string): DiscordStreamCallbacks {
+function makeDiscordStreamCallback(token: string, channelId: string, options: { verbose?: boolean } = {}): DiscordStreamCallbacks {
+  const { verbose = false } = options;
   let accumulated = "";
   let streamMsgId: string | null = null;
   let editTimer: ReturnType<typeof setTimeout> | null = null;
@@ -701,6 +718,7 @@ function makeDiscordStreamCallback(token: string, channelId: string): DiscordStr
   };
 
   const onToolEvent = (line: string): void => {
+    if (!verbose) return;
     // Post the placeholder on the first tool event
     if (!placeholderPosted) {
       postPlaceholder().catch((err) =>
@@ -725,6 +743,19 @@ function makeDiscordStreamCallback(token: string, channelId: string): DiscordStr
     // Wait for the in-flight POST to resolve (already done if streamMsgId is set)
     const result = await waitForStreamMsg();
     if (!result?.msgId) return;
+    if (verbose) {
+      // In verbose mode, edit the stream message to show the final content
+      // instead of deleting it — the full tool + text output stays visible
+      if (accumulated) {
+        const content = accumulated.slice(0, DISCORD_MAX_MESSAGE_LEN);
+        try {
+          await discordApi(token, "PATCH", `/channels/${channelId}/messages/${result.msgId}`, { content });
+        } catch (err) {
+          debugLog(`Stream finalize edit failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      return;
+    }
     try {
       await discordApi(token, "DELETE", `/channels/${channelId}/messages/${result.msgId}`);
     } catch (err) {
@@ -1053,8 +1084,9 @@ async function handleMessageCreate(token: string, message: DiscordMessage, skipC
       }
     }
     if (config.streaming) {
-      streamCb = makeDiscordStreamCallback(config.token, channelId);
+      streamCb = makeDiscordStreamCallback(config.token, channelId, { verbose: verboseChannels.has(channelId) });
     }
+    const isVerbose = verboseChannels.has(channelId);
 
     const result = await (async () => {
       try {
@@ -1084,7 +1116,12 @@ async function handleMessageCreate(token: string, message: DiscordMessage, skipC
         });
       }
       const { paths: imagePaths, cleanedText: finalText } = extractImagePaths(cleanedText || "", config.imageOutputRoots, requestStartedAt);
-      if (imagePaths.length > 0) {
+      if (isVerbose && config.streaming) {
+        // In verbose mode the stream message already shows the full output
+        if (imagePaths.length > 0) {
+          await sendImagesSilent(config.token, channelId, imagePaths);
+        }
+      } else if (imagePaths.length > 0) {
         await sendMessageWithImages(config.token, channelId, finalText || "(empty response)", imagePaths);
       } else {
         await sendMessage(config.token, channelId, finalText || "(empty response)");
@@ -1245,6 +1282,18 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
         await respondToInteraction(interaction, {
           content: `Failed to read context: ${err instanceof Error ? err.message : err}`,
         });
+      }
+      return;
+    }
+
+    if (interaction.data.name === "verbose") {
+      const channelId = interaction.channel_id!;
+      if (verboseChannels.has(channelId)) {
+        verboseChannels.delete(channelId);
+        await respondToInteraction(interaction, { content: "Verbose mode off." });
+      } else {
+        verboseChannels.add(channelId);
+        await respondToInteraction(interaction, { content: "Verbose mode on — tool calls will be shown.", flags: 64 });
       }
       return;
     }
