@@ -765,8 +765,10 @@ function makeDiscordStreamCallback(token: string, channelId: string, options: { 
       // In verbose mode, keep the stream message as-is — it already shows
       // the last ~2000 chars of tool calls + text from scheduleEdit.
       // The full text output will be sent as a new (chunked) message below.
+      console.log(`[Discord][stream] Verbose finalize: keeping stream message ${result.msgId}`);
       return;
     }
+    console.log(`[Discord][stream] Non-verbose finalize: deleting stream message ${result.msgId}`);
     try {
       await discordApi(token, "DELETE", `/channels/${channelId}/messages/${result.msgId}`);
     } catch (err) {
@@ -1098,6 +1100,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage, skipC
       streamCb = makeDiscordStreamCallback(config.token, channelId, { verbose: verboseChannels.has(channelId) });
     }
     const isVerbose = verboseChannels.has(channelId);
+    if (isVerbose) console.log(`[Discord] Verbose mode active for channel ${channelId}`);
 
     const result = await (async () => {
       try {
