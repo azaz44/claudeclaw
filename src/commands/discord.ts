@@ -744,16 +744,9 @@ function makeDiscordStreamCallback(token: string, channelId: string, options: { 
     const result = await waitForStreamMsg();
     if (!result?.msgId) return;
     if (verbose) {
-      // In verbose mode, edit the stream message to show the final content
-      // instead of deleting it — the full tool + text output stays visible
-      if (accumulated) {
-        const content = accumulated.slice(0, DISCORD_MAX_MESSAGE_LEN);
-        try {
-          await discordApi(token, "PATCH", `/channels/${channelId}/messages/${result.msgId}`, { content });
-        } catch (err) {
-          debugLog(`Stream finalize edit failed: ${err instanceof Error ? err.message : err}`);
-        }
-      }
+      // In verbose mode, keep the stream message as-is — it already shows
+      // the last ~2000 chars of tool calls + text from scheduleEdit.
+      // The full text output will be sent as a new (chunked) message below.
       return;
     }
     try {
@@ -1116,13 +1109,14 @@ async function handleMessageCreate(token: string, message: DiscordMessage, skipC
         });
       }
       const { paths: imagePaths, cleanedText: finalText } = extractImagePaths(cleanedText || "", config.imageOutputRoots, requestStartedAt);
-      if (isVerbose && config.streaming) {
-        // In verbose mode the stream message already shows the full output
-        if (imagePaths.length > 0) {
+      if (imagePaths.length > 0) {
+        if (isVerbose && config.streaming) {
+          // Verbose: stream already shows text, just send images silently
+          await sendMessage(config.token, channelId, finalText || "(empty response)");
           await sendImagesSilent(config.token, channelId, imagePaths);
+        } else {
+          await sendMessageWithImages(config.token, channelId, finalText || "(empty response)", imagePaths);
         }
-      } else if (imagePaths.length > 0) {
-        await sendMessageWithImages(config.token, channelId, finalText || "(empty response)", imagePaths);
       } else {
         await sendMessage(config.token, channelId, finalText || "(empty response)");
       }
